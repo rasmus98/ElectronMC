@@ -1,67 +1,16 @@
 import numpy as np
 from numpy.random import normal as randn
-import astropy.constants as c
-import astropy.units as u
-from numba.experimental import jitclass
-from numba import float64, int32
+from collections import namedtuple
 
 import numba
 
-# Define the specification for the Spectrum jitclass
-spec = [
-    ('nfreq_spec', int32),          # Number of frequency bins
-    ('freq_fact', float64),         # Frequency factor
-    ('freq_range', float64),        # Frequency range
-    ('freq_min', float64),          # Minimum frequency
-    ('freq_max', float64),          # Maximum frequency
-    ('d_freq', float64),            # Frequency step size
-    ('spectrum', float64[:]),       # Spectrum array
-    ('spectrum_single', float64[:]),# Single-interaction spectrum
-    ('spectrum_double', float64[:]),# Double-interaction spectrum
-    ('spectrum_more', float64[:]),  # Multiple-interaction spectrum
-    ('freqs', float64[:]),          # Frequencies array
-]
-
-@jitclass(spec)
-class Spectrum:
-    def __init__(self, 
-                 nfreq_spec=10001, 
-                 freq_fact=5.e-6, 
-                 freq_range_scaling = 1.05):
-        
-        # Initialize default values
-        self.nfreq_spec = nfreq_spec
-        self.freq_fact = freq_fact
-        self.freq_range = freq_range_scaling * self.freq_fact
-        
-        # Calculate dependent variables
-        self.freq_min = self.freq_fact - self.freq_range / 2.
-        self.freq_max = self.freq_fact + self.freq_range / 2.
-        self.d_freq = self.freq_range / self.nfreq_spec
-        
-        # Initialize spectrum arrays
-        self.spectrum = np.zeros(self.nfreq_spec)
-        self.spectrum_single = np.zeros(self.nfreq_spec)
-        self.spectrum_double = np.zeros(self.nfreq_spec)
-        self.spectrum_more = np.zeros(self.nfreq_spec)
-        self.freqs = np.linspace(self.freq_min, self.freq_max, self.nfreq_spec)
-
-# Define the specification for the Environment jitclass
-spec = [
-    ('R_inner', float64),      # Inner radius
-    ('R_outer', float64),      # Outer radius
-    ('kappa', float64),        # Opacity or scattering coefficient
-    ('vel', float64),          # Velocity in km/s
-    ('temp', float64),         # Temperature (dimensionless)
-    ('beta_stdev', float64),   # Standard deviation of beta (v/c)
-]
-@jitclass(spec)
 class Environment:
     def __init__(self, 
                  R_inner=1.0, 
                  R_outer=1.1, 
                  kappa=30.0, 
                  vel=30.0, 
+                 freq_fact=5.e-6,
                  temp=1.e4 * 1.38e-23 / 9.11e-31 / 3e8 / 3e8):
         
         # Initialize default environment parameters
@@ -69,23 +18,40 @@ class Environment:
         self.R_outer = R_outer
         self.kappa = kappa
         self.vel = vel  # velocity in km/s
+        self.freq_fact = freq_fact  # Frequency factor for photon packets
         
         # Temperature and derived standard deviation for beta (velocity/c)
         self.temp = temp
         self.beta_stdev = np.sqrt(self.temp)
 
-# Assuming Spectrum and Environment classes have been defined as before.
+def class_instance_to_namedtuple(instance):
+    # Get the class name to use as the typename
+    typename = type(instance).__name__
+    
+    # Get the dictionary of instance attributes
+    attr_dict = vars(instance)
+    
+    # Extract field names and values
+    field_names = list(attr_dict.keys())
+    attr_values = list(attr_dict.values())
+    
+    # Define the namedtuple with the field names
+    ClassTuple = namedtuple(typename, field_names)
+    
+    # Create the namedtuple instance with the attribute values
+    return ClassTuple(*attr_values)
+
 
 @numba.njit(fastmath=True)
-def initialize_packet(spectrum_obj, env_obj):
+def initialize_packet(env_obj):
     """Initialize a photon packet with default values."""
     r_current = env_obj.R_inner  # Starting at inner boundary
     mu_current = 0.99999999  # Incoming photon direction.
-    nu_current = randn(loc=1.0, scale=env_obj.vel / 299792.458) * spectrum_obj.freq_fact
+    nu_current = randn(loc=1.0, scale=env_obj.vel / 299792.458) * env_obj.freq_fact
     return r_current, mu_current, nu_current
 
 @numba.njit(fastmath=True)
-def move_packet(spectrum_obj, env_obj, r_current, mu_current, nu_current):
+def move_packet(env_obj, r_current, mu_current, nu_current):
     """Move the packet until it exits the scattering region or is absorbed."""
     inside = True
     escape = False
@@ -133,7 +99,7 @@ def calculate_s_max_outer(env_obj, r_current, mu_current):
     discriminant = r_current**2 * (mu_current**2 - 1.0) + env_obj.R_outer**2
     s_max = -r_current * mu_current + np.sqrt(discriminant)
     return s_max
-
+ 
 @numba.njit(fastmath=True)
 def handle_inner_boundary(env_obj, r_current, mu_current, s_max):
     """Handle the interaction with the inner boundary."""
@@ -174,7 +140,7 @@ def calculate_scattering(env_obj, nu_current, mu_current):
 
     # Rejection sampling based on increased flux
     v_ele_x, v_ele_y, v_ele_z = rejection_sampling(
-        n_phot_x_in, n_phot_y_in, n_phot_z_in, v_ele_x, v_ele_y, v_ele_z, env_obj.beta_stdev
+        n_phot_x_in, n_phot_y_in, n_phot_z_in, env_obj.beta_stdev
     )
 
     # Transform to electron rest frame
@@ -242,9 +208,8 @@ def compton_scatter(nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in):
         n_phot_z = mu_new
 
         # Calculate scattering angle cosine
-        cos_theta_scattering = (
-            n_phot_x * n_phot_x_in + n_phot_y * n_phot_y_in + n_phot_z * n_phot_z_in
-        )
+        cos_theta_scattering = n_phot_x * n_phot_x_in + n_phot_y * n_phot_y_in + n_phot_z * n_phot_z_in
+        
         # Calculate Compton recoil factor
         f_comp = 1.0 / (1 + nu_new * (1 - cos_theta_scattering))
         # Differential cross-section (Klein-Nishina formula)
@@ -283,7 +248,7 @@ def transform_to_observer_frame(nu_new, n_phot_x, n_phot_y, n_phot_z, v_ele_x, v
     return nu_current, mu_new
 
 @numba.njit(parallel=True, fastmath=True)
-def propagate_photons(n_pkts, spectrum_obj, env_obj):
+def _propagate_photons(n_pkts, env_obj):
     """Main simulation loop to process all photon packets."""
     escaped = np.zeros(n_pkts, dtype=np.bool_)
     energies = np.zeros(n_pkts)
@@ -291,10 +256,26 @@ def propagate_photons(n_pkts, spectrum_obj, env_obj):
 
     for i in numba.prange(n_pkts):
         # Initialize packet
-        r_current, mu_current, nu_current = initialize_packet(spectrum_obj, env_obj)
+        r_current, mu_current, nu_current = initialize_packet(env_obj)
         # Move packet through the medium
-        escaped[i], escaped[i], escaped[i] = move_packet(
-            spectrum_obj, env_obj, r_current, mu_current, nu_current
+        escaped[i], energies[i], interactions[i] = move_packet(
+            env_obj, r_current, mu_current, nu_current
         )
 
-    return escaped, energies, interactions
+    return energies[escaped], interactions[escaped]
+
+def propagate_photons(n_pkts, env_obj):
+    """Main simulation loop to process all photon packets."""
+    return _propagate_photons(n_pkts, class_instance_to_namedtuple(env_obj))
+
+if __name__ == "__main__":
+    import time
+    env_obj = Environment()
+    # warm up
+    escaped, energies, interactions = propagate_photons(n_pkts=int(1e3), env_obj=env_obj)
+    print("Starting test")
+    for n_threads in [1, 2, 4, 8, 16, 32, 64]:
+        numba.set_num_threads(n_threads)
+        start = time.time()
+        escaped, energies, interactions = propagate_photons(n_pkts=int(1e6), env_obj=env_obj)
+        print("Took:", time.time() - start, "with", n_threads, "threads")
