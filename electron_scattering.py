@@ -8,21 +8,23 @@ class Environment:
     def __init__(self, 
                  R_inner=1.0, 
                  R_outer=1.1, 
-                 kappa=30.0, 
+                 tau=3, 
                  vel=30.0, 
                  freq_fact=5.e-6,
-                 temp=1.e4 * 1.38e-23 / 9.11e-31 / 3e8 / 3e8):
+                 temp=1.e4 * 1.38e-23 / 9.11e-31 / 3e8 / 3e8,
+                 volume_init=False):
         
         # Initialize default environment parameters
         self.R_inner = R_inner
         self.R_outer = R_outer
-        self.kappa = kappa
+        self.kappa = tau / (R_outer - R_inner)  # Optical depth
         self.vel = vel  # velocity in km/s
         self.freq_fact = freq_fact  # Frequency factor for photon packets
         
         # Temperature and derived standard deviation for beta (velocity/c)
         self.temp = temp
         self.beta_stdev = np.sqrt(self.temp)
+        self.volume_init = volume_init
 
 def class_instance_to_namedtuple(instance):
     # Get the class name to use as the typename
@@ -45,8 +47,15 @@ def class_instance_to_namedtuple(instance):
 @numba.njit(fastmath=True)
 def initialize_packet(env_obj):
     """Initialize a photon packet with default values."""
-    r_current = env_obj.R_inner  # Starting at inner boundary
-    mu_current = 0.99999999  # Incoming photon direction.
+    if env_obj.volume_init:
+        rand = env_obj.R_inner**3 + np.random.rand() * (env_obj.R_outer**3 - env_obj.R_inner**3)
+        r_current = rand**(1/3)
+        n = np.random.randn(3)
+        n /= sum(n**2)**0.5 # points on unit sphere
+        mu_current = n[0]
+    else:
+        r_current = env_obj.R_inner  # Starting at inner boundary
+        mu_current = 0.99999999  # Incoming photon direction.
     nu_current = randn(loc=1.0, scale=env_obj.vel / 299792.458) * env_obj.freq_fact
     return r_current, mu_current, nu_current
 
@@ -80,9 +89,13 @@ def move_packet(env_obj, r_current, mu_current, nu_current):
             break
 
         # Photon scatters before reaching any boundary
-        r_current, mu_current, nu_current, interactions = scatter_photon(
-            env_obj, r_current, mu_current, nu_current, s_next, interactions
+        r_current, mu_current, nu_current = scatter_photon(
+            env_obj, r_current, mu_current, nu_current, s_next
         )
+        interactions += 1
+        if interactions > 10000:
+            print("Error: too many interactions")
+            break
 
     return escape, nu_current, interactions
 
@@ -112,7 +125,7 @@ def handle_inner_boundary(env_obj, r_current, mu_current, s_max):
     return r_new, mu_new
 
 @numba.njit(fastmath=True)
-def scatter_photon(env_obj, r_current, mu_current, nu_current, s_next, interactions):
+def scatter_photon(env_obj, r_current, mu_current, nu_current, s_next):
     """Scatter the photon within the scattering region."""
     # Move the packet
     r_new = np.sqrt(r_current**2 + s_next**2 + 2.0 * s_next * r_current * mu_current)
@@ -125,77 +138,69 @@ def scatter_photon(env_obj, r_current, mu_current, nu_current, s_next, interacti
     # Frequency and scattering calculations
     nu_current, mu_new = calculate_scattering(env_obj, nu_current, mu_new)
 
-    interactions += 1
-    return r_new, mu_new, nu_current, interactions
+    return r_new, mu_new, nu_current
 
 @numba.njit(fastmath=True)
-def calculate_scattering(env_obj, nu_current, mu_current):
+def calculate_scattering(env_obj, nu_elec_in, mu_in):
     """Calculate the scattering of the photon."""
     # Electron speed calculation (in units of c)
+    # naming scheme: name_frame_direction(_in/out)
+    # v: electron velocity, n: photon direction, obs: observer frame, elec: electron rest frame
 
-    # Photon direction in observer frame
-    n_phot_x_in = 0.0
-    n_phot_y_in = np.sqrt(1.0 - mu_current**2) * (1 if np.random.random() < 0.5 else -1)
-    n_phot_z_in = mu_current
+    # Photon direction in observer frame 
+    n_obs_x = 0.0
+    n_obs_y = np.sqrt(1.0 - mu_in**2) * (1 if np.random.random() < 0.5 else -1)
+    n_obs_z = mu_in
 
     # Rejection sampling based on increased flux
-    v_ele_x, v_ele_y, v_ele_z = rejection_sampling(
-        n_phot_x_in, n_phot_y_in, n_phot_z_in, env_obj.beta_stdev
+    v_obs_x, v_obs_y, v_obs_z, gamma = rejection_sampling(
+        n_obs_x, n_obs_y, n_obs_z, env_obj.beta_stdev
     )
 
     # Transform to electron rest frame
-    nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in, gamma = transform_to_electron_frame(
-        nu_current, n_phot_x_in, n_phot_y_in, n_phot_z_in, v_ele_x, v_ele_y, v_ele_z
+    nu_elec_in, n_elec_x_in, n_elec_y_in, n_elec_z_in = frame_transform(
+        nu_elec_in, n_obs_x, n_obs_y, n_obs_z, v_obs_x, v_obs_y, v_obs_z, gamma
     )
 
     # Scatter photon in electron rest frame
-    nu_new, n_phot_x, n_phot_y, n_phot_z = compton_scatter(
-        nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in
+    nu_elec_out, n_elec_x_out, n_elec_y_out, n_elec_z_out = compton_scatter(
+        nu_elec_in, n_elec_x_in, n_elec_y_in, n_elec_z_in
     )
 
     # Transform back to observer frame
-    nu_current, mu_new = transform_to_observer_frame(
-        nu_new, n_phot_x, n_phot_y, n_phot_z, v_ele_x, v_ele_y, v_ele_z, gamma
+    nu_obs_out, n_obs_x_out, n_obs_y_out, n_obs_z_out = frame_transform(
+        nu_elec_out, n_elec_x_out, n_elec_y_out, n_elec_z_out, -v_obs_x, -v_obs_y, -v_obs_z, gamma
     )
 
-    return nu_current, mu_new
-
-@numba.njit(fastmath=True)
-def draw_electron_velocity(beta_stdev):
-    """Draw electron velocities from a normal distribution."""
-    v_ele_x = np.random.normal(0.0, beta_stdev)
-    v_ele_y = np.random.normal(0.0, beta_stdev)
-    v_ele_z = np.random.normal(0.0, beta_stdev)
-    return v_ele_x, v_ele_y, v_ele_z
+    return nu_obs_out, n_obs_z_out
 
 @numba.njit(fastmath=True)
 def rejection_sampling(n_phot_x_in, n_phot_y_in, n_phot_z_in, beta_stdev):
     """Perform rejection sampling to account for increased flux."""
     while True:
-        v_ele_x, v_ele_y, v_ele_z = draw_electron_velocity(beta_stdev)
+        v_ele_x, v_ele_y, v_ele_z = np.random.normal(0.0, beta_stdev, 3)
         ndotv = n_phot_x_in * v_ele_x + n_phot_y_in * v_ele_y + n_phot_z_in * v_ele_z
         p_accept = 0.5 * (1 - ndotv)
         if np.random.rand() < p_accept:
             break
-    return v_ele_x, v_ele_y, v_ele_z
+    gamma = 1.0 / np.sqrt(1.0 - (v_ele_x**2 + v_ele_y**2 + v_ele_z**2))
+    return v_ele_x, v_ele_y, v_ele_z, gamma
 
 @numba.njit(fastmath=True)
-def transform_to_electron_frame(nu_current, n_phot_x_in, n_phot_y_in, n_phot_z_in, v_ele_x, v_ele_y, v_ele_z):
+def frame_transform(nu_current, n_phot_x_in, n_phot_y_in, n_phot_z_in, v_ele_x, v_ele_y, v_ele_z, gamma):
     """Transform photon to electron rest frame."""
-    speed = np.sqrt(v_ele_x**2 + v_ele_y**2 + v_ele_z**2)
-    gamma = 1.0 / np.sqrt(1.0 - speed**2)
+    # Transform direction cosines (eq 5 of Castor 1972)
     ndotv = n_phot_x_in * v_ele_x + n_phot_y_in * v_ele_y + n_phot_z_in * v_ele_z
-
-    # Transform direction cosines
     factor = gamma * (1 - ndotv)
-    n_phot_x_in = (n_phot_x_in - v_ele_x * (gamma - 1) * ndotv / speed**2) / factor
-    n_phot_y_in = (n_phot_y_in - v_ele_y * (gamma - 1) * ndotv / speed**2) / factor
-    n_phot_z_in = (n_phot_z_in - v_ele_z * (gamma - 1) * ndotv / speed**2) / factor
+    gamma_factor = gamma - gamma*gamma/(1 + gamma) * ndotv
+    n_phot_x = (n_phot_x_in - v_ele_x * gamma_factor) / factor
+    n_phot_y = (n_phot_y_in - v_ele_y * gamma_factor) / factor
+    n_phot_z = (n_phot_z_in - v_ele_z * gamma_factor) / factor
 
     # Transform frequency
     nu_new = nu_current * gamma * (1 - ndotv)
 
-    return nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in, gamma
+    return nu_new, n_phot_x, n_phot_y, n_phot_z
 
 @numba.njit(fastmath=True)
 def compton_scatter(nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in):
@@ -229,24 +234,6 @@ def draw_random_direction():
     phi = 2.0 * np.pi * np.random.rand()
     return mu_new, phi
 
-@numba.njit(fastmath=True)
-def transform_to_observer_frame(nu_new, n_phot_x, n_phot_y, n_phot_z, v_ele_x, v_ele_y, v_ele_z, gamma):
-    """Transform photon back to observer frame after scattering."""
-    ndotv = n_phot_x * v_ele_x + n_phot_y * v_ele_y + n_phot_z * v_ele_z
-    ndotv *= -1.0  # Reverse sign for reverse transformation
-
-    # Transform direction cosines back to observer frame
-    factor = gamma * (1 - ndotv)
-    n_phot_x = (n_phot_x + v_ele_x * (gamma - 1) * ndotv / v_ele_x**2) / factor
-    n_phot_y = (n_phot_y + v_ele_y * (gamma - 1) * ndotv / v_ele_y**2) / factor
-    n_phot_z = (n_phot_z + v_ele_z * (gamma - 1) * ndotv / v_ele_z**2) / factor
-
-    # Transform frequency back to observer frame
-    nu_current = nu_new * gamma * (1 - ndotv)
-    mu_new = n_phot_z  # Update direction cosine
-
-    return nu_current, mu_new
-
 @numba.njit(parallel=True, fastmath=True)
 def _propagate_photons(n_pkts, env_obj):
     """Main simulation loop to process all photon packets."""
@@ -272,10 +259,10 @@ if __name__ == "__main__":
     import time
     env_obj = Environment()
     # warm up
-    escaped, energies, interactions = propagate_photons(n_pkts=int(1e3), env_obj=env_obj)
+    energies, interactions = propagate_photons(n_pkts=int(1e3), env_obj=env_obj)
     print("Starting test")
-    for n_threads in [1, 2, 4, 8, 16, 32, 64]:
+    for n_threads in [12]:
         numba.set_num_threads(n_threads)
         start = time.time()
-        escaped, energies, interactions = propagate_photons(n_pkts=int(1e6), env_obj=env_obj)
+        energies, interactions = propagate_photons(n_pkts=int(1e7), env_obj=env_obj)
         print("Took:", time.time() - start, "with", n_threads, "threads")
