@@ -1,9 +1,14 @@
 import numpy as np
 from numpy.random import normal as randn
 from collections import namedtuple
+from tqdm import tqdm
 
 import numba
+from numba import types
+from numba.typed import Dict
+from numba.types import int32, float64, boolean, Tuple
 
+kelvin_to_electron_masses = 1.38e-23 / 9.11e-31 / 3e8 / 3e8
 class Environment:
     def __init__(self, 
                  R_inner=1.0, 
@@ -11,9 +16,11 @@ class Environment:
                  tau=3, 
                  vel=30.0, 
                  freq_fact=5.e-6,
-                 temp=1.e4 * 1.38e-23 / 9.11e-31 / 3e8 / 3e8,
-                 volume_init=False):
-        
+                 temp_kelvin=1.e4,
+                 volume_init=False,
+                 emulate_laor=False,
+                 max_interactions=10000):
+        self.temp_kelvin = temp_kelvin
         # Initialize default environment parameters
         self.R_inner = R_inner
         self.R_outer = R_outer
@@ -22,27 +29,33 @@ class Environment:
         self.freq_fact = freq_fact  # Frequency factor for photon packets
         
         # Temperature and derived standard deviation for beta (velocity/c)
-        self.temp = temp
+        self.temp = temp_kelvin * kelvin_to_electron_masses
         self.beta_stdev = np.sqrt(self.temp)
         self.volume_init = volume_init
+
+        # Emulate Laor 2018 by resetting to the center of the cloud after scatterings + not doing directional rejection
+        self.emulate_laor = emulate_laor
+        self.max_interactions = max_interactions
 
 def class_instance_to_namedtuple(instance):
     # Get the class name to use as the typename
     typename = type(instance).__name__
-    
     # Get the dictionary of instance attributes
     attr_dict = vars(instance)
-    
     # Extract field names and values
     field_names = list(attr_dict.keys())
+    # Define the namedtuple with the field names
+    return namedtuple(typename, field_names)
+__environment__namedtuple = class_instance_to_namedtuple(Environment())
+
+def convert_class_to_namedtuple(instance, type):
+    # Get the dictionary of instance attributes
+    attr_dict = vars(instance)
+    # Extract field names and values
     attr_values = list(attr_dict.values())
     
-    # Define the namedtuple with the field names
-    ClassTuple = namedtuple(typename, field_names)
-    
     # Create the namedtuple instance with the attribute values
-    return ClassTuple(*attr_values)
-
+    return type(*attr_values)
 
 @numba.njit(fastmath=True)
 def initialize_packet(env_obj):
@@ -63,7 +76,6 @@ def initialize_packet(env_obj):
 def move_packet(env_obj, r_current, mu_current, nu_current):
     """Move the packet until it exits the scattering region or is absorbed."""
     inside = True
-    escape = False
     interactions = 0
 
     while inside:
@@ -85,7 +97,6 @@ def move_packet(env_obj, r_current, mu_current, nu_current):
         if s_next > s_max:
             # Photon escapes
             inside = False
-            escape = True
             break
 
         # Photon scatters before reaching any boundary
@@ -93,11 +104,10 @@ def move_packet(env_obj, r_current, mu_current, nu_current):
             env_obj, r_current, mu_current, nu_current, s_next
         )
         interactions += 1
-        if interactions > 10000:
-            print("Error: too many interactions")
+        if interactions >= env_obj.max_interactions:
             break
 
-    return escape, nu_current, interactions
+    return nu_current, interactions
 
 @numba.njit(fastmath=True)
 def calculate_s_max_inner(env_obj, r_current, mu_current):
@@ -137,6 +147,9 @@ def scatter_photon(env_obj, r_current, mu_current, nu_current, s_next):
 
     # Frequency and scattering calculations
     nu_current, mu_new = calculate_scattering(env_obj, nu_current, mu_new)
+    if env_obj.emulate_laor: # if we are emulating laor, we need to reset to the center of the cloud
+        r_new = env_obj.R_inner
+        mu_new = 0.99999999
 
     return r_new, mu_new, nu_current
 
@@ -164,7 +177,7 @@ def calculate_scattering(env_obj, nu_elec_in, mu_in):
 
     # Scatter photon in electron rest frame
     nu_elec_out, n_elec_x_out, n_elec_y_out, n_elec_z_out = compton_scatter(
-        nu_elec_in, n_elec_x_in, n_elec_y_in, n_elec_z_in
+        nu_elec_in, n_elec_x_in, n_elec_y_in, n_elec_z_in, env_obj
     )
 
     # Transform back to observer frame
@@ -203,7 +216,7 @@ def frame_transform(nu_current, n_phot_x_in, n_phot_y_in, n_phot_z_in, v_ele_x, 
     return nu_new, n_phot_x, n_phot_y, n_phot_z
 
 @numba.njit(fastmath=True)
-def compton_scatter(nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in):
+def compton_scatter(nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in, env_obj):
     """Perform Compton scattering in the electron rest frame."""
     while True:
         # Draw random scattering direction
@@ -219,7 +232,7 @@ def compton_scatter(nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in):
         f_comp = 1.0 / (1 + nu_new * (1 - cos_theta_scattering))
         # Differential cross-section (Klein-Nishina formula)
         p_accept = 0.5 * f_comp**2 * (f_comp + 1.0 / f_comp - 1 + cos_theta_scattering**2)
-        if np.random.rand() < p_accept:
+        if np.random.rand() < p_accept or env_obj.emulate_laor: 
             break  # Accept the scattering angle
 
     # Apply Compton shift to frequency
@@ -237,7 +250,6 @@ def draw_random_direction():
 @numba.njit(parallel=True, fastmath=True)
 def _propagate_photons(n_pkts, env_obj):
     """Main simulation loop to process all photon packets."""
-    escaped = np.zeros(n_pkts, dtype=np.bool_)
     energies = np.zeros(n_pkts)
     interactions = np.zeros(n_pkts, dtype=np.int32)
 
@@ -245,15 +257,46 @@ def _propagate_photons(n_pkts, env_obj):
         # Initialize packet
         r_current, mu_current, nu_current = initialize_packet(env_obj)
         # Move packet through the medium
-        escaped[i], energies[i], interactions[i] = move_packet(
+        energies[i], interactions[i] = move_packet(
             env_obj, r_current, mu_current, nu_current
         )
 
-    return energies[escaped], interactions[escaped]
+    return energies, interactions
 
-def propagate_photons(n_pkts, env_obj):
+named_tuple_cache = {}
+def propagate_photons(n_pkts, env_obj, progress=False, batch_size=1_000_000, ):
     """Main simulation loop to process all photon packets."""
-    return _propagate_photons(n_pkts, class_instance_to_namedtuple(env_obj))
+    named_tuple_env = convert_class_to_namedtuple(env_obj, __environment__namedtuple) # convert to named tuple for numba
+    iterator = range(0, n_pkts, batch_size)
+    if progress:
+        bar = tqdm(iterator, unit="packets", total=n_pkts, unit_scale=True)
+    final_energies = []
+    final_interactions = []
+    for i in iterator:
+        packets = min(batch_size, n_pkts-i)
+        energies, interactions = _propagate_photons(packets, named_tuple_env)
+        final_energies.append(energies)
+        final_interactions.append(interactions)
+        if progress:
+            bar.update(packets)
+    return np.concatenate(final_energies), np.concatenate(final_interactions)
+
+def propagate_photons_binned(n_pkts, env_obj, bin_edges, interactions_selection, progress=False, batch_size=1_000_000):
+    """Main simulation loop to process all photon packets."""
+    named_tuple_env = convert_class_to_namedtuple(env_obj, __environment__namedtuple) # convert to named tuple for numba
+    iterator = range(0, n_pkts, batch_size)
+    if progress:
+        bar = tqdm(iterator, unit="packets", total=n_pkts, unit_scale=True)
+    histogams = np.zeros((len(interactions_selection)+1, len(bin_edges)-1))
+    for i in iterator:
+        packets = min(batch_size, n_pkts-i)
+        energies, interactions = _propagate_photons(packets, named_tuple_env)
+        for j, interactions_bin in enumerate(interactions_selection):
+            histogams[j] += np.histogram(energies[interactions==interactions_bin], bins=bin_edges)[0]
+        histogams[-1] += np.histogram(energies[interactions > interactions_selection[-1]], bins=bin_edges)[0]
+        if progress:
+            bar.update(packets)
+    return histogams
 
 if __name__ == "__main__":
     import time
