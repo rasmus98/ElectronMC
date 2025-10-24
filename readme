@@ -1,0 +1,43 @@
+# Electron Scattering Monte Carlo Routine
+
+A Monte Carlo codebase for modelling electron-scattering effects on emission lines of a compact nebular object in a spherical geometry. It takes an input spectrum, keeps track of original source photons and produces output photon counts.
+
+The source code is written by [Dr Stuard Sim](https://www.qub.ac.uk/schools/SchoolofMathematicsandPhysics/Study/PostgraduateResearch/find-a-phd-supervisor/dr-stuart-sim.html).
+
+The code is parallelized with `numba` and modularized for efficient compuation by [Rasmus Damgaard](https://github.com/rasmus98).
+
+<span style="background-color: yellow; color: darkred; font-size:20px; font-weight:bold;">Caution!</span>
+
+<span style="background-color: lightyellow;">
+This routine assumes a purely electron scattering spherical geometry. It is not guaranteed to work outside of these conditions.
+</span>
+
+<span style="background-color: lightyellow;">
+This code is provided. Use at your own risk for your use cases. 
+</span>
+
+
+## Usage
+
+The scripts e_scatt_sims_*.py demonstrate usage patterns. 
+- An Environment object represents the physical conditions of the simulation (photons initalized at centre/volumetrically, density, temperature, inital line properties etc)
+- propagate_photons and propagate_photons_binned use this environment, and generate n_pkts MCMC samples. 
+
+Note: the runtime scales roughly as number of scatterings + number of photons. For high tau, this goes exponentially. If using JupyterNotebook, only killing the kernel can stop the Numba function. For testing, you might therefore want to decrease batch_size. 
+
+### Notes
+
+- Units: ...
+- Input : ...
+- Output: ...
+
+
+## The structure of this repository
+
+`electron_scattering.py` - core routine that handles that scattering kinematics and ...
+
+`spectrum.dat` - example source spectrum for scattering processing.
+
+`correctness_tests.ipynb` - tests...
+
+`Laor_comparison.ipynb` - comparison of a similar computation published in Laor et al. (2006)
