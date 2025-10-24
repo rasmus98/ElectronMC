@@ -18,7 +18,6 @@ class Environment:
                  freq_fact=5.e-6,
                  temp_kelvin=1.e4,
                  volume_init=False,
-                 emulate_laor=False,
                  max_interactions=10000):
         self.temp_kelvin = temp_kelvin
         # Initialize default environment parameters
@@ -33,8 +32,6 @@ class Environment:
         self.beta_stdev = np.sqrt(self.temp)
         self.volume_init = volume_init
 
-        # Emulate Laor 2018 by resetting to the center of the cloud after scatterings + not doing directional rejection
-        self.emulate_laor = emulate_laor
         self.max_interactions = max_interactions
 
 def class_instance_to_namedtuple(instance):
@@ -147,9 +144,6 @@ def scatter_photon(env_obj, r_current, mu_current, nu_current, s_next):
 
     # Frequency and scattering calculations
     nu_current, mu_new = calculate_scattering(env_obj, nu_current, mu_new)
-    if env_obj.emulate_laor: # if we are emulating laor, we need to reset to the center of the cloud
-        r_new = env_obj.R_inner
-        mu_new = 0.99999999
 
     return r_new, mu_new, nu_current
 
@@ -177,7 +171,7 @@ def calculate_scattering(env_obj, nu_elec_in, mu_in):
 
     # Scatter photon in electron rest frame
     nu_elec_out, n_elec_x_out, n_elec_y_out, n_elec_z_out = compton_scatter(
-        nu_elec_in, n_elec_x_in, n_elec_y_in, n_elec_z_in, env_obj
+        nu_elec_in, n_elec_x_in, n_elec_y_in, n_elec_z_in
     )
 
     # Transform back to observer frame
@@ -216,7 +210,7 @@ def frame_transform(nu_current, n_phot_x_in, n_phot_y_in, n_phot_z_in, v_ele_x, 
     return nu_new, n_phot_x, n_phot_y, n_phot_z
 
 @numba.njit(fastmath=True)
-def compton_scatter(nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in, env_obj):
+def compton_scatter(nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in):
     """Perform Compton scattering in the electron rest frame."""
     while True:
         # Draw random scattering direction
@@ -232,7 +226,7 @@ def compton_scatter(nu_new, n_phot_x_in, n_phot_y_in, n_phot_z_in, env_obj):
         f_comp = 1.0 / (1 + nu_new * (1 - cos_theta_scattering))
         # Differential cross-section (Klein-Nishina formula)
         p_accept = 0.5 * f_comp**2 * (f_comp + 1.0 / f_comp - 1 + cos_theta_scattering**2)
-        if np.random.rand() < p_accept or env_obj.emulate_laor: 
+        if np.random.rand() < p_accept: 
             break  # Accept the scattering angle
 
     # Apply Compton shift to frequency
