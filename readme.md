@@ -25,12 +25,6 @@ The scripts e_scatt_sims_*.py demonstrate usage patterns.
 
 Note: the runtime scales roughly as number of scatterings + number of photons. For high tau, this goes exponentially. If using JupyterNotebook, only killing the kernel can stop the Numba function. For testing, you might therefore might want to decrease batch_size. 
 
-### Notes
-
-- Units: ...
-- Input : ...
-- Output: ...
-
 
 ## The structure of this repository
 
