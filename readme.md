@@ -6,16 +6,12 @@ The source code is written by [Dr Stuard Sim](https://www.qub.ac.uk/schools/Scho
 
 The code is parallelized with `numba` for efficient computation and modularized by [Rasmus Damgaard](https://github.com/rasmus98).
 
-<span style="background-color: yellow; color: darkred; font-size:20px; font-weight:bold;">Caution!</span>
+### Caution!
 
-<span style="background-color: lightyellow;">
+
 This routine assumes a purely electron scattering spherical geometry. It is not guaranteed to work outside of these conditions.
-</span>
 
-<span style="background-color: lightyellow;">
-This code is provided. Use at your own risk for your use cases. 
-</span>
-
+This code is provided as-is with no guarantees. Use at your own risk for your use cases. 
 
 ## Usage
 
